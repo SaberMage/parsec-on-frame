@@ -120,7 +120,7 @@ Type=Application
 Name=Parsec
 Comment=Remote desktop streaming (x86_64 client under FEX)
 Exec=$PREFIX/parsec-desktop.sh
-Icon=parsecd
+Icon=$ICON_DIR/parsecd.png
 Terminal=false
 Categories=Network;RemoteAccess;
 EOF
