@@ -132,7 +132,8 @@ static double now_ms(void)
 
 static long held_now;
 static int avlog = -1;
-static long n_pkt, n_frm, n_again, n_err;
+static long n_pkt, n_frm, n_again, n_err, n_waits, n_timeouts;
+static double wait_max;
 static int dump_fd = -2;
 int open(const char *path, int flags, ...);
 long write(int fd, const void *buf, unsigned long n);
@@ -145,11 +146,12 @@ static void maybe_report(void)
         t_window = t;
     if (t - t_window < 1000)
         return;
-    dprintf(2, "[avlog] held %ld | pkts %ld frames %ld backlog %ld eagain %ld err %ld | send avg %.2f ms | recv avg %.2f max %.2f ms\n",
+    dprintf(2, "[avlog] held %ld | pkts %ld frames %ld backlog %ld eagain %ld err %ld | send avg %.2f ms | recv avg %.2f max %.2f ms | waits %ld max %.1f ms, timeouts %ld\n",
             held_now, n_pkt, n_frm, n_pkt - n_frm, n_again, n_err,
-            n_pkt ? send_ms / n_pkt : 0, n_frm ? recv_ms / n_frm : 0, recv_max);
-    n_pkt = n_frm = n_again = n_err = 0;
-    send_ms = recv_ms = recv_max = 0;
+            n_pkt ? send_ms / n_pkt : 0, n_frm ? recv_ms / n_frm : 0, recv_max,
+            n_waits, wait_max, n_timeouts);
+    n_pkt = n_frm = n_again = n_err = n_waits = n_timeouts = 0;
+    send_ms = recv_ms = recv_max = wait_max = 0;
     t_window = t;
 }
 
@@ -206,17 +208,24 @@ static void hw_track(void *avctx, const AVCodec *codec)
     h->gop_overflow = 0;
 }
 
-/* Does this Annex B packet contain an IDR/IRAP picture? */
+/* Does this Annex B packet contain an IDR/IRAP picture? Runs on every packet,
+ * so it stops at the first slice NAL (right after the small parameter-set and
+ * SEI NALs) instead of scanning the whole picture, which is slow under FEX. */
 static int is_keyframe(int codec_id, const unsigned char *d, int n)
 {
     for (int i = 0; i + 3 < n; i++) {
         if (d[i] || d[i + 1] || d[i + 2] != 1)
             continue;
         int b = d[i + 3];
-        if (codec_id == AV_CODEC_ID_H264 && (b & 0x1f) == 5)
-            return 1;
-        if (codec_id == AV_CODEC_ID_HEVC && ((b >> 1) & 0x3f) >= 16 && ((b >> 1) & 0x3f) <= 23)
-            return 1;
+        if (codec_id == AV_CODEC_ID_H264) {
+            int type = b & 0x1f;
+            if (type >= 1 && type <= 5) /* coded slice */
+                return type == 5;
+        } else {
+            int type = (b >> 1) & 0x3f;
+            if (type <= 31) /* VCL NAL */
+                return type >= 16 && type <= 23;
+        }
         i += 3;
     }
     return 0;
@@ -374,7 +383,14 @@ int avcodec_receive_frame(void *avctx, void *frame)
 
     /* A frame is owed but still decoding: wait for it (~2 ms normally). */
     if (ret == -11 && h && h->owed > 0 && !h->flushing) {
+        double w = now_ms();
         ret = recv_wait(c, frame);
+        w = now_ms() - w;
+        n_waits++;
+        if (w > wait_max)
+            wait_max = w;
+        if (ret == -11)
+            n_timeouts++;
         if (ret == -11 && ++h->timeouts >= 3) {
             /* That packet evidently produced no frame; stop waiting for it. */
             h->owed--;

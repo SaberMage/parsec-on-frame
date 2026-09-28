@@ -117,7 +117,7 @@ to `~/.parsec/stderr.txt`. Put these in the Steam shortcut's launch options
 | Launch option | Effect |
 |---|---|
 | `PARSEC_HWDEC=0 %command%` | Use FFmpeg's software decoders instead of the hardware one |
-| `PARSEC_AVLOG=1 %command%` | Log per-second decode stats; `held` should stay at 0 or 1 |
+| `PARSEC_AVLOG=1 %command%` | Log per-second decode stats: frames `held` (should stay at 0 or 1), waits for owed frames and timeouts |
 | `PARSEC_DUMP=/path/stream.bin %command%` | Record the raw compressed video stream, for offline testing |
 
 `tools/decode_latency.c` replays a recorded or test stream through the shim
