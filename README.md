@@ -29,7 +29,14 @@ cd parsec-on-frame
 ./install.sh
 ```
 
-Then launch **Parsec** from your Steam library, log in, and connect.
+Then launch **Parsec**, log in, and connect. There are two ways to launch it:
+
+- **As a game:** from your Steam library. It runs full-screen through Steam's
+  FEX compatibility tool, like any x86 game.
+- **As a desktop window:** from the Steam Frame dashboard's **+ → Launch
+  Program** menu. It opens in its own window next to your other desktop apps.
+  The menu lists `.desktop` launchers, so this also puts Parsec in the desktop
+  mode app menu.
 
 - FEX is downloaded by Steam the first time something needs it. If Parsec won't
   start the first time, give Steam a minute to finish downloading FEX, or
@@ -60,6 +67,8 @@ force **FEX-Emu**.
 ~/.local/share/parsec/
 ├── parsecd                  official Parsec x86_64 loader (downloads its own parsecd-*.so into ~/.parsec)
 ├── parsec.sh                launcher: sets library/audio paths, logs to ~/.parsec/stderr.txt
+├── parsec-desktop.sh        native launcher for Launch Program: runs parsec.sh under FEX itself
+├── fex-data/                FEX state for launches outside Steam
 └── lib/
     ├── libavcodec.so.62     the shim (src/avdec_v4l2.c)
     ├── libavcodec-real.so.62, libavutil.so.60, libswresample.so.6   FFmpeg 8.1 (BtbN LGPL build)
@@ -70,6 +79,16 @@ force **FEX-Emu**.
 Steam gets a non-Steam shortcut named **Parsec** with FEX (`fex-stable`) as its
 compatibility tool. `tools/steam_shortcut.py` creates it through the Steam
 client's local DevTools port, so Steam doesn't need a restart.
+
+`~/.local/share/applications/parsec.desktop` is what the dashboard's **Launch
+Program** menu picks up. That menu lists whatever Steam's non-Steam-app scanner
+(`SteamClient.Apps.ScanForInstalledNonSteamApps`) finds in the standard
+`.desktop` locations, minus a small blocklist of system tools. Choosing an entry
+runs its command line directly on the device (`LaunchNonSteamApp`) with no
+compatibility tool, so `parsec-desktop.sh` starts FEX's `fex-compat-tool`
+itself. It also sets `ENABLE_GAMESCOPE_WSI=0`: the window is a normal desktop
+window, not a Gamescope game, and with the Gamescope Vulkan layer active,
+Parsec shows a "Hooking has failed" error dialog.
 
 ## How it works (and what went wrong without it)
 

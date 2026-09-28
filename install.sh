@@ -34,6 +34,10 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 for tool in curl bsdtar tar xz python3 clang ld.lld patchelf; do
     command -v "$tool" >/dev/null || die "missing required tool: $tool"
 done
+# Replacing libraries under a running Parsec can crash it.
+if pgrep -f "^$PREFIX/parsecd" >/dev/null; then
+    die "Parsec is running; close it first"
+fi
 
 WORK="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/parsec-on-frame.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -106,6 +110,20 @@ clang -target x86_64-linux-gnu -O1 -fPIC -fno-stack-protector -shared -nostdlib 
     -L"$GUEST_ROOTFS/usr/lib" -l:libc.so.6 \
     -L"$L" -l:libavcodec-real.so.62 -l:libavutil.so.60
 install -m755 "$REPO/src/parsec.sh" "$PREFIX/parsec.sh"
+install -m755 "$REPO/src/parsec-desktop.sh" "$PREFIX/parsec-desktop.sh"
+
+# --- desktop entry (Steam Frame dashboard "Launch Program" menu, app menus) ----
+mkdir -p "$HOME/.local/share/applications"
+cat > "$HOME/.local/share/applications/parsec.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Parsec
+Comment=Remote desktop streaming (x86_64 client under FEX)
+Exec=$PREFIX/parsec-desktop.sh
+Icon=parsecd
+Terminal=false
+Categories=Network;RemoteAccess;
+EOF
 
 # --- Steam shortcut ------------------------------------------------------------
 if [ "${1:-}" != "--no-steam" ]; then
@@ -117,7 +135,7 @@ Couldn't add the shortcut automatically. Add it by hand in desktop mode:
 EOF
 fi
 
-say "Done. Launch \"Parsec\" from your Steam library."
+say "Done. Launch \"Parsec\" from your Steam library, or from the dashboard's Launch Program menu."
 if command -v iw >/dev/null && iw dev 2>/dev/null | grep -q 'type managed'; then
     ifc=$(iw dev | awk '/Interface/{i=$2} /type managed/{print i; exit}')
     if iw dev "$ifc" get power_save 2>/dev/null | grep -q on; then
