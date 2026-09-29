@@ -109,8 +109,14 @@ clang -target x86_64-linux-gnu -O1 -fPIC -fno-stack-protector -shared -nostdlib 
     -o "$L/libavcodec.so.62" "$REPO/src/avdec_v4l2.c" \
     -L"$GUEST_ROOTFS/usr/lib" -l:libc.so.6 \
     -L"$L" -l:libavcodec-real.so.62 -l:libavutil.so.60
+# Preloaded: caps FFmpeg's infinite waits on the V4L2 decoder (poll_timeout.c).
+clang -target x86_64-linux-gnu -O1 -fPIC -fno-stack-protector -shared -nostdlib \
+    -fuse-ld=lld -Wl,--no-undefined \
+    -o "$L/poll_timeout.so" "$REPO/src/poll_timeout.c" \
+    -L"$GUEST_ROOTFS/usr/lib" -l:libc.so.6
 install -m755 "$REPO/src/parsec.sh" "$PREFIX/parsec.sh"
 install -m755 "$REPO/src/parsec-desktop.sh" "$PREFIX/parsec-desktop.sh"
+install -m755 "$REPO/src/parsec-force-quit.sh" "$PREFIX/parsec-force-quit.sh"
 install -m755 "$REPO/src/set-window-icon.py" "$PREFIX/set-window-icon.py"
 
 # --- desktop entry (Steam Frame dashboard "Launch Program" menu, app menus) ----
@@ -121,6 +127,17 @@ Type=Application
 Name=Parsec
 Comment=Remote desktop streaming (x86_64 client under FEX)
 Exec=$PREFIX/parsec-desktop.sh
+Icon=$ICON_DIR/parsecd.png
+Terminal=false
+Categories=Network;RemoteAccess;
+EOF
+# A hung Parsec ignores the dashboard's close; this SIGKILLs it.
+cat > "$HOME/.local/share/applications/parsec-force-quit.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Parsec (Force Quit)
+Comment=Kill a frozen Parsec
+Exec=$PREFIX/parsec-force-quit.sh
 Icon=$ICON_DIR/parsecd.png
 Terminal=false
 Categories=Network;RemoteAccess;

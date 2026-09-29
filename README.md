@@ -68,10 +68,12 @@ force **FEX-Emu**.
 ├── parsecd                  official Parsec x86_64 loader (downloads its own parsecd-*.so into ~/.parsec)
 ├── parsec.sh                launcher: sets library/audio paths, logs to ~/.parsec/stderr.txt
 ├── parsec-desktop.sh        native launcher for Launch Program: runs parsec.sh under FEX itself
+├── parsec-force-quit.sh     SIGKILLs a frozen Parsec ("Parsec (Force Quit)" in Launch Program)
 ├── set-window-icon.py       gives Parsec's window an icon (_NET_WM_ICON) for the dashboard
 ├── fex-data/                FEX state for launches outside Steam
 └── lib/
     ├── libavcodec.so.62     the shim (src/avdec_v4l2.c)
+    ├── poll_timeout.so      preloaded: caps FFmpeg's infinite waits on the decoder (src/poll_timeout.c)
     ├── libavcodec-real.so.62, libavutil.so.60, libswresample.so.6   FFmpeg 8.1 (BtbN LGPL build)
     ├── libX*, libSM, libICE, libjpeg, libpng                        missing from the FEX rootfs
     └── libasound, libpipewire, alsa-lib/, pipewire-0.3/, spa-0.2/   x86 ALSA → host PipeWire audio
@@ -134,11 +136,27 @@ and needs only Python and libX11.
    a frame is owed, the shim waits for it (usually about 2 ms, capped at
    20 ms). Measured on a real Parsec H.265 stream, the lag from packet to frame
    dropped from one or more frame intervals to about 1.7 ms at any frame rate.
+8. **Frozen video, then a frozen Parsec that won't close.** After queueing a
+   packet, FFmpeg's V4L2 decoder waits for output with `poll(fd, -1)`, i.e.
+   forever. If the hardware decoder stalls, the thread running Parsec's video
+   pipeline never returns. The UI keeps drawing until it needs that pipeline
+   (for example, opening the menu), and then it freezes too. A hung Parsec
+   also ignores SIGTERM, so the dashboard can't close it.
+   - `poll_timeout.so`, preloaded by `parsec.sh`, caps infinite polls on V4L2
+     devices at 1 s. FFmpeg treats the timeout as "no frame yet".
+   - If the decoder produces nothing for 1.5 s while packets keep arriving, the
+     shim reopens it and replays from the last keyframe, the same recovery as
+     in item 6.
+   - A watchdog thread logs `[shim] WATCHDOG` to `~/.parsec/stderr.txt` if a
+     decoder call still gets stuck for 2 s or more.
 
 ## Troubleshooting
 
 Parsec's own log is `~/.parsec/log.txt`, and the client's stdout/stderr goes
-to `~/.parsec/stderr.txt`. Put these in the Steam shortcut's launch options
+to `~/.parsec/stderr.txt`. The previous session's output is kept in
+`stderr.prev.txt`. If Parsec ever freezes, launch **Parsec (Force Quit)** from
+Launch Program, or run `~/.local/share/parsec/parsec-force-quit.sh`, then check
+those logs for `[shim]` lines. Force-quits are logged to `~/.parsec/force-quit.log`. Put these in the Steam shortcut's launch options
 (before `%command%`) to change behavior or add logging:
 
 | Launch option | Effect |

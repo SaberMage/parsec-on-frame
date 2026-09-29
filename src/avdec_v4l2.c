@@ -17,6 +17,9 @@
  *   (sent around keyframes) as end of stream and return AVERROR_EOF mid-stream,
  *   which Parsec treats as fatal (error -14). On that, transparently open a
  *   fresh decoder and replay the packets since the last keyframe into it.
+ *   The same recovery kicks in if the hardware decoder stalls: no frame for
+ *   1.5 s while packets keep coming. (poll_timeout.c, preloaded by parsec.sh,
+ *   keeps FFmpeg from blocking forever on a stalled decoder in the first place.)
  * - FFmpeg's V4L2 decoder answers EAGAIN while a frame is still being decoded
  *   (it prefers taking more input), and Parsec moves on, so frames come out one
  *   or more packets late: 6 frames behind in practice, i.e. hundreds of ms at
@@ -26,6 +29,8 @@
  * - PARSEC_AVLOG=1 logs per-second decode stats to stderr (~/.parsec/stderr.txt),
  *   including how many frames the hardware decoder currently owes ("held").
  * - PARSEC_DUMP=<file> appends the raw compressed video stream to <file>.
+ * - A watchdog thread logs "[shim] WATCHDOG" to stderr if a hardware decoder
+ *   call hasn't returned after 2 s (then 10 s, 30 s), naming the call.
  *
  * Build with install.sh. It must be built at -O1: the -O2 build crashes under
  * FEX. No headers are needed; the few FFmpeg/libc declarations are below. */
@@ -167,9 +172,52 @@ typedef struct {
     int flushing;
     long owed;      /* packets sent that have not produced a frame yet */
     int timeouts;   /* consecutive waits that gave up */
+    double last_frame_ms;  /* when the decoder last produced a frame */
+    int pkts_since_frame;
 } HwCtx;
 
 int nanosleep(const struct timespec *req, struct timespec *rem);
+int pthread_create(void *thread, const void *attr, void *(*fn)(void *), void *arg);
+
+/* Watchdog: which hardware decoder call is in progress, and since when. */
+static const char *volatile busy_what;
+static volatile double busy_since;
+static volatile long busy_owed;
+
+static void busy_begin(const char *what, long owed)
+{
+    busy_owed = owed;
+    busy_what = what;
+    busy_since = now_ms();
+}
+
+static void busy_end(void)
+{
+    busy_since = 0;
+}
+
+static void *watchdog(void *arg)
+{
+    struct timespec tick = { 0, 500000000 };
+    double reported_since = 0;
+    int level = 0;
+    const double limits[] = { 2000, 10000, 30000 };
+    (void)arg;
+    for (;;) {
+        nanosleep(&tick, 0);
+        double since = busy_since;
+        if (!since || since != reported_since) {
+            reported_since = since;
+            level = 0;
+        }
+        if (since && level < 3 && now_ms() - since > limits[level]) {
+            dprintf(2, "[shim] WATCHDOG: stuck in %s for %.0f s (frames owed %ld)\n",
+                    busy_what, (now_ms() - since) / 1000, busy_owed);
+            level++;
+        }
+    }
+    return 0;
+}
 
 static HwCtx hw_ctxs[8];
 
@@ -198,12 +246,19 @@ static void hw_track(void *avctx, const AVCodec *codec)
         h = hw_find(0);
     if (!h)
         return;
+    static int watchdog_started;
+    if (!watchdog_started) {
+        unsigned long tid;
+        watchdog_started = pthread_create(&tid, 0, watchdog, 0) == 0;
+    }
     h->orig = avctx;
     h->codec = codec;
     h->repl = 0;
     h->flushing = 0;
     h->owed = 0;
     h->timeouts = 0;
+    h->last_frame_ms = now_ms();
+    h->pkts_since_frame = 0;
     h->gop_n = 0;
     h->gop_overflow = 0;
 }
@@ -282,7 +337,7 @@ static void *hw_reopen(HwCtx *h)
     if (h->repl)
         real_free(&h->repl);
     h->repl = c;
-    dprintf(2, "[shim] hardware decoder hit a spurious EOF; reopened it\n");
+    dprintf(2, "[shim] reopened the hardware decoder\n");
     return c;
 }
 
@@ -313,9 +368,15 @@ int avcodec_send_packet(void *avctx, const void *pkt)
         write(dump_fd, *(void **)((char *)pkt + 24), *(int *)((char *)pkt + 32));
 
     double t = avlog ? now_ms() : 0;
+    if (h)
+        busy_begin("avcodec_send_packet", h->owed);
     int ret = real_send(c, pkt);
-    if (h && pkt && ret >= 0)
+    if (h)
+        busy_end();
+    if (h && pkt && ret >= 0) {
         h->owed++;
+        h->pkts_since_frame++;
+    }
     if (avlog) {
         send_ms += now_ms() - t;
         n_pkt++;
@@ -343,8 +404,8 @@ static int recv_wait(void *c, void *frame)
  * the newest frame. */
 static int gop_replay(HwCtx *h, void *c, void *frame)
 {
-    int got = -11;
-    for (int i = 0; i < h->gop_n; i++) {
+    int got = -11, frames = 0, i;
+    for (i = 0; i < h->gop_n; i++) {
         if (real_send(c, h->gop[i]) < 0)
             continue;
         if (got == 0)
@@ -352,8 +413,13 @@ static int gop_replay(HwCtx *h, void *c, void *frame)
         got = recv_wait(c, frame);
         if (got == -541478725)
             got = -11;
+        if (got == 0)
+            frames++;
+        else if (!frames && i >= 5)
+            break; /* the new decoder isn't producing anything either */
     }
-    dprintf(2, "[shim] replayed %d packets since the last keyframe\n", h->gop_n);
+    dprintf(2, "[shim] replayed %d of %d packets since the last keyframe (%d frames)\n",
+            i < h->gop_n ? i + 1 : h->gop_n, h->gop_n, frames);
     return got;
 }
 
@@ -366,13 +432,24 @@ int avcodec_receive_frame(void *avctx, void *frame)
     void *c = h && h->repl ? h->repl : avctx;
 
     double t = avlog > 0 ? now_ms() : 0;
+    if (h)
+        busy_begin("avcodec_receive_frame", h->owed);
     int ret = real_recv(c, frame);
 
-    if (ret == -541478725 /* AVERROR_EOF */ && h && !h->flushing) {
+    int stalled = ret == -11 && h && !h->flushing && h->pkts_since_frame >= 3 &&
+                  now_ms() - h->last_frame_ms > 1500;
+    if (stalled)
+        dprintf(2, "[shim] hardware decoder stalled (no frame for %.1f s, %d packets); reopening it\n",
+                (now_ms() - h->last_frame_ms) / 1000, h->pkts_since_frame);
+    if ((ret == -541478725 /* AVERROR_EOF */ || stalled) && h && !h->flushing) {
         long was_owed = h->owed;
+        h->last_frame_ms = now_ms();
+        h->pkts_since_frame = 0;
         ret = -11; /* AVERROR(EAGAIN) */
         h->owed = 0;
+        busy_begin("EOF recovery (reopening the decoder)", was_owed);
         c = hw_reopen(h);
+        busy_begin("EOF recovery (replaying packets)", was_owed);
         if (c && !h->gop_overflow)
             ret = gop_replay(h, c, frame);
         if (ret == 0 && !was_owed) { /* Parsec already has this picture */
@@ -383,6 +460,7 @@ int avcodec_receive_frame(void *avctx, void *frame)
 
     /* A frame is owed but still decoding: wait for it (~2 ms normally). */
     if (ret == -11 && h && h->owed > 0 && !h->flushing) {
+        busy_begin("avcodec_receive_frame (waiting for an owed frame)", h->owed);
         double w = now_ms();
         ret = recv_wait(c, frame);
         w = now_ms() - w;
@@ -401,9 +479,13 @@ int avcodec_receive_frame(void *avctx, void *frame)
         if (h->owed > 0)
             h->owed--;
         h->timeouts = 0;
+        h->last_frame_ms = now_ms();
+        h->pkts_since_frame = 0;
     }
-    if (h)
+    if (h) {
         held_now = h->owed;
+        busy_end();
+    }
 
     if (avlog > 0) {
         double d = now_ms() - t;

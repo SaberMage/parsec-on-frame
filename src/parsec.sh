@@ -12,5 +12,9 @@ export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export ALSA_PLUGIN_DIR="$HERE/lib/alsa-lib"
 export PIPEWIRE_MODULE_DIR="$HERE/lib/pipewire-0.3"
 export SPA_PLUGIN_DIR="$HERE/lib/spa-0.2"
+# Keep FFmpeg from waiting forever on a stalled hardware decoder (poll_timeout.c).
+export LD_PRELOAD="$HERE/lib/poll_timeout.so${LD_PRELOAD:+:$LD_PRELOAD}"
+# Keep the previous session's output (a relaunch would otherwise wipe it).
 mkdir -p "$HOME/.parsec"
+[ -f "$HOME/.parsec/stderr.txt" ] && mv -f "$HOME/.parsec/stderr.txt" "$HOME/.parsec/stderr.prev.txt"
 exec "$HERE/parsecd" "$@" >"$HOME/.parsec/stderr.txt" 2>&1
