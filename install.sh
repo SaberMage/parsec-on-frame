@@ -111,6 +111,7 @@ clang -target x86_64-linux-gnu -O1 -fPIC -fno-stack-protector -shared -nostdlib 
     -L"$L" -l:libavcodec-real.so.62 -l:libavutil.so.60
 install -m755 "$REPO/src/parsec.sh" "$PREFIX/parsec.sh"
 install -m755 "$REPO/src/parsec-desktop.sh" "$PREFIX/parsec-desktop.sh"
+install -m755 "$REPO/src/set-window-icon.py" "$PREFIX/set-window-icon.py"
 
 # --- desktop entry (Steam Frame dashboard "Launch Program" menu, app menus) ----
 mkdir -p "$HOME/.local/share/applications"

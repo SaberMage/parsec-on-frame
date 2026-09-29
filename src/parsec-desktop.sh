@@ -12,4 +12,8 @@ export STEAM_COMPAT_DATA_PATH="$HERE/fex-data"
 mkdir -p "$STEAM_COMPAT_DATA_PATH"
 # Not a Gamescope app window here; keep the Gamescope Vulkan WSI layer out of it.
 export ENABLE_GAMESCOPE_WSI=0
+# Parsec doesn't set a window icon; the dashboard shows windows' _NET_WM_ICON.
+# The helper follows this PID, which exec below hands over to the FEX process.
+ICON="$HOME/.local/share/icons/hicolor/256x256/apps/parsecd.png"
+python3 "$HERE/set-window-icon.py" parsecd "$ICON" $$ >/dev/null 2>&1 &
 exec python3 "$FEX_TOOL" waitforexitandrun -- "$HERE/parsec.sh" "$@"

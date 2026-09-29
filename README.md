@@ -68,6 +68,7 @@ force **FEX-Emu**.
 ├── parsecd                  official Parsec x86_64 loader (downloads its own parsecd-*.so into ~/.parsec)
 ├── parsec.sh                launcher: sets library/audio paths, logs to ~/.parsec/stderr.txt
 ├── parsec-desktop.sh        native launcher for Launch Program: runs parsec.sh under FEX itself
+├── set-window-icon.py       gives Parsec's window an icon (_NET_WM_ICON) for the dashboard
 ├── fex-data/                FEX state for launches outside Steam
 └── lib/
     ├── libavcodec.so.62     the shim (src/avdec_v4l2.c)
@@ -89,6 +90,13 @@ compatibility tool, so `parsec-desktop.sh` starts FEX's `fex-compat-tool`
 itself. It also sets `ENABLE_GAMESCOPE_WSI=0`: the window is a normal desktop
 window, not a Gamescope game, and with the Gamescope Vulkan layer active,
 Parsec shows a "Hooking has failed" error dialog.
+
+Parsec also never sets a window icon, and the dashboard takes running windows'
+icons from the X11 `_NET_WM_ICON` property. `parsec-desktop.sh` starts
+`set-window-icon.py`, which waits for windows of class `parsecd` and sets that
+property from the Parsec logo at 128, 64, 48 and 32 px. A 256 px copy would
+exceed the X server's request size limit. The helper exits when Parsec does,
+and needs only Python and libX11.
 
 ## How it works (and what went wrong without it)
 
