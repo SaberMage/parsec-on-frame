@@ -17,6 +17,8 @@
  *   (sent around keyframes) as end of stream and return AVERROR_EOF mid-stream,
  *   which Parsec treats as fatal (error -14). On that, transparently open a
  *   fresh decoder and replay the packets since the last keyframe into it.
+ *   The EOF can surface from any call (the first receive, the wait for an
+ *   owed frame, or send_packet), so every one of them recovers.
  *   The same recovery kicks in if the hardware decoder stalls: no frame for
  *   1.5 s while packets keep coming. (poll_timeout.c, preloaded by parsec.sh,
  *   keeps FFmpeg from blocking forever on a stalled decoder in the first place.)
@@ -341,6 +343,10 @@ static void *hw_reopen(HwCtx *h)
     return c;
 }
 
+void *av_frame_alloc(void);
+void av_frame_free(void **frame);
+static int hw_recover(HwCtx *h, void **pc, void *frame);
+
 int avcodec_send_packet(void *avctx, const void *pkt)
 {
     if (!real_send)
@@ -371,6 +377,16 @@ int avcodec_send_packet(void *avctx, const void *pkt)
     if (h)
         busy_begin("avcodec_send_packet", h->owed);
     int ret = real_send(c, pkt);
+    if (ret == -541478725 /* AVERROR_EOF */ && h && pkt && !h->flushing) {
+        /* The packet is already in the GOP buffer, so the replay feeds it in. */
+        void *scratch = av_frame_alloc();
+        if (scratch) {
+            hw_recover(h, &c, scratch);
+            av_frame_free(&scratch);
+        }
+        h->owed = 0;
+        ret = 0;
+    }
     if (h)
         busy_end();
     if (h && pkt && ret >= 0) {
@@ -423,6 +439,29 @@ static int gop_replay(HwCtx *h, void *c, void *frame)
     return got;
 }
 
+/* Replace a hardware decoder that hit a spurious EOF (or stalled) and replay
+ * the packets since the last keyframe into the new one. Returns the newest
+ * frame (0) if Parsec still needs one, else AVERROR(EAGAIN). Used wherever an
+ * EOF can surface outside a deliberate flush. */
+static int hw_recover(HwCtx *h, void **pc, void *frame)
+{
+    long was_owed = h->owed;
+    int ret = -11; /* AVERROR(EAGAIN) */
+    h->last_frame_ms = now_ms();
+    h->pkts_since_frame = 0;
+    h->owed = 0;
+    busy_begin("EOF recovery (reopening the decoder)", was_owed);
+    *pc = hw_reopen(h);
+    busy_begin("EOF recovery (replaying packets)", was_owed);
+    if (*pc && !h->gop_overflow)
+        ret = gop_replay(h, *pc, frame);
+    if (ret == 0 && !was_owed) { /* Parsec already has this picture */
+        av_frame_unref(frame);
+        ret = -11;
+    }
+    return ret;
+}
+
 int avcodec_receive_frame(void *avctx, void *frame)
 {
     if (!real_recv)
@@ -441,22 +480,8 @@ int avcodec_receive_frame(void *avctx, void *frame)
     if (stalled)
         dprintf(2, "[shim] hardware decoder stalled (no frame for %.1f s, %d packets); reopening it\n",
                 (now_ms() - h->last_frame_ms) / 1000, h->pkts_since_frame);
-    if ((ret == -541478725 /* AVERROR_EOF */ || stalled) && h && !h->flushing) {
-        long was_owed = h->owed;
-        h->last_frame_ms = now_ms();
-        h->pkts_since_frame = 0;
-        ret = -11; /* AVERROR(EAGAIN) */
-        h->owed = 0;
-        busy_begin("EOF recovery (reopening the decoder)", was_owed);
-        c = hw_reopen(h);
-        busy_begin("EOF recovery (replaying packets)", was_owed);
-        if (c && !h->gop_overflow)
-            ret = gop_replay(h, c, frame);
-        if (ret == 0 && !was_owed) { /* Parsec already has this picture */
-            av_frame_unref(frame);
-            ret = -11;
-        }
-    }
+    if ((ret == -541478725 /* AVERROR_EOF */ || stalled) && h && !h->flushing)
+        ret = hw_recover(h, &c, frame);
 
     /* A frame is owed but still decoding: wait for it (~2 ms normally). */
     if (ret == -11 && h && h->owed > 0 && !h->flushing) {
@@ -474,6 +499,9 @@ int avcodec_receive_frame(void *avctx, void *frame)
             h->owed--;
             h->timeouts = 0;
         }
+        /* The spurious EOF can also surface here, while waiting for the frame. */
+        if (ret == -541478725 /* AVERROR_EOF */)
+            ret = hw_recover(h, &c, frame);
     }
     if (ret == 0 && h) {
         if (h->owed > 0)
